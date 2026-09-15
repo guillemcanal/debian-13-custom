@@ -1,0 +1,67 @@
+#!/bin/bash
+set -ex
+
+SCRIPT_DIR="$(pwd)"
+WORK_DIR="/overlayfs/desktop-layers-work-$$"
+
+# Base filesystem
+OVERLAY_LOWER="../chroot"
+
+create_desktop_layer() {
+	local DESKTOP_NAME="$1"
+	local TASK_PACKAGE="$2"
+	local OVERLAY_UPPER="${WORK_DIR}/${DESKTOP_NAME}/upper"
+	local OVERLAY_WORK="${WORK_DIR}/${DESKTOP_NAME}/work"
+	local OVERLAY_MOUNT="${WORK_DIR}/${DESKTOP_NAME}/merged"
+
+	# Create working directories
+	mkdir -p "${OVERLAY_UPPER}" "${OVERLAY_WORK}" "${OVERLAY_MOUNT}"
+		
+	# Create overlay filesystem
+	mount -t overlay overlay \
+		-o "lowerdir=${OVERLAY_LOWER},upperdir=${OVERLAY_UPPER},workdir=${OVERLAY_WORK}" \
+		"${OVERLAY_MOUNT}"
+	
+	# Setup chroot environment
+	mount -t proc none "${OVERLAY_MOUNT}/proc"
+	mount -t sysfs none "${OVERLAY_MOUNT}/sys"
+	mount --rbind /dev "${OVERLAY_MOUNT}/dev"
+	mount --rbind /run "${OVERLAY_MOUNT}/run"
+	mount --bind /etc/resolv.conf "${OVERLAY_MOUNT}/etc/resolv.conf"
+	
+	chroot "${OVERLAY_MOUNT}" /bin/bash -c "
+		set -e
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get install -y ${TASK_PACKAGE}
+	"
+
+	# Kill any remaining processes in chroot
+	fuser -km "${OVERLAY_MOUNT}" || true
+	sleep 1
+	umount -R -l "${OVERLAY_MOUNT}" 2>/dev/null || true
+
+	# Create desktop squashfs
+	mkdir -p desktops
+
+	# A file removed by installing ${TASK_PACKAGE} exists in OVERLAY_UPPER
+	# as a whiteout: a character device (major/minor 0/0), overlayfs' own
+	# marker meaning "hide the copy of this path in the layer below" —
+	# meaningless outside a real overlay mount. dpkg/apt never create
+	# character devices themselves, so any found here is one of those
+	# markers. Calamares' native "unpackfs" (see modules/unpackfs.conf)
+	# unpacks the base filesystem and this squashfs in sequence with a
+	# plain overwrite, no overlay resolution, so a whiteout left in would
+	# land on the target as a literal broken device node instead of the
+	# deletion it stands for. List them — relative to OVERLAY_UPPER, same
+	# as the paths apply-desktop-whiteouts later deletes relative to the
+	# install target — and keep them out of the image entirely.
+	local WHITEOUTS="desktops/${DESKTOP_NAME}-desktop.whiteouts"
+	find "${OVERLAY_UPPER}" -type c -printf '%P\n' > "${WHITEOUTS}"
+
+	mksquashfs "${OVERLAY_UPPER}" "desktops/${DESKTOP_NAME}-desktop.squashfs" -comp zstd -ef "${WHITEOUTS}"
+}
+
+# Create layers for each desktop environment
+create_desktop_layer "gnome" "task-gnome-desktop"
+create_desktop_layer "kde" "task-kde-desktop"
+create_desktop_layer "xfce" "task-xfce-desktop"

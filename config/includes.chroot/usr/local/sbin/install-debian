@@ -1,0 +1,329 @@
+#!/bin/bash
+
+# An attempt at a Modern Debian installation with:
+#
+# - a simple paritionning model with an efi and a luks2 parition,
+# - a strong luks2 encryption, with slow key derivation and integrity protection tuned security for modern hardware,
+# - a btrfs filesystem optimized for timeshift,
+# - a completely offline installation with the possibility of choosing between several desktop environment (gnome, kde or xfce),
+# - a Debian Trixie the non free packages and backports (trying hard to be as unstable as Ubuntu LTS),
+# - systemd-boot and Dracdracut which replace Grub2 and Initramfs Tools because it's better (source: Internet),
+
+set -e
+
+# Mount options shared by every btrfs subvolume mount, and baked into the
+# firstboot kernel cmdline's rootflags so both stay in sync.
+OPTS=defaults,noatime,nodiratime,ssd,compress=zstd
+
+# Function to ask for password with verification
+ask_password() {
+	local prompt="$1"
+	local error=""
+	while true; do
+		local password=$(gum input --password --placeholder "$prompt ${error}")
+		error=""
+		local confirm=$(gum input --password --placeholder "Confirm $prompt")
+		if [[ "$password" == "$confirm" ]] && [[ -n "$password" ]]; then
+			echo "$password"
+			return 0
+		fi
+		error="(passwords doesn't match. please retry)"
+	done
+}
+
+# Configure disk target
+DISK=$(lsblk -d -n -o NAME,SIZE,TYPE,TRAN,MODEL \
+| awk -v root="$(lsblk -no PKNAME "$(findmnt -n -o SOURCE /)")" \
+	'$1 != root && $3 == "disk" && $4 != "usb"' \
+| gum choose --header "Select the disk on which to install Debian." | awk '{print $1}')
+
+# Configure locale
+# /usr/share/i18n/SUPPORTED is restricted (see config/includes.chroot/usr/
+# share/i18n/SUPPORTED) to fr_FR.UTF-8 and en_US.UTF-8, France first —
+# it used to be the full ~500-entry system list, with fr_FR/en_US
+# prepended and deduplicated here to float them to the top.
+LOCALE=$(awk '$2=="UTF-8"{print $1}' /usr/share/i18n/SUPPORTED \
+| gum choose --header "Select a locale")
+
+# Generate the locale
+sed -i "s/^# *\(${LOCALE} UTF-8\)/\1/" /etc/locale.gen
+locale-gen
+
+# Configure keyboard layout
+XKB_FILE="/usr/share/X11/xkb/rules/base.lst"
+while true; do
+	LAYOUT=$(
+	awk '
+	/^! layout/ { in_layout=1; next }
+	/^!/ { in_layout=0 }
+	in_layout {
+		code=$1
+		$1=""
+		sub(/^ +/, "", $0)
+		desc=$0
+		printf "%-10s %s\n", code, desc
+	}
+	' "$XKB_FILE" | sort | gum choose --header "Select keyboard layout" | awk '{ print $1 }'
+	)
+
+	# Ask keyboard layout variant
+	VARIANT=$(
+	awk -v layout="$LAYOUT" '
+	/^! variant/ { in_variant=1; next }
+	/^!/ { in_variant=0 }
+	in_variant && $0 ~ layout ":" {
+		code=$1
+		sub(/^[^:]+: /, "", $0)
+		desc=$0
+		printf "%-20s %s\n", code, desc
+	}
+	' "$XKB_FILE" | sort | gum choose --header "Select variant for layout" | awk '{ print $1 }'
+	)
+
+	cat <<-EOF > /etc/default/keyboard
+	XKBMODEL="pc105"
+	XKBLAYOUT="${LAYOUT}"
+	XKBVARIANT="${VARIANT}"
+	XKBOPTIONS=""
+	BACKSPACE="guess"
+	EOF
+
+	setupcon --save
+
+	gum write --placeholder="Test your keyboard configuration"
+	gum confirm "Is your keyboard okay ?" --default=0 && break || true
+done
+
+# Make sure nothing from a previous installation still holds the disk busy
+swapoff -a || true
+mount | awk -v d="/dev/${DISK}" '$1 ~ "^"d {print $3}' | tac | xargs -r umount -R || true
+dmsetup remove_all --force || true
+
+# Wipe any leftover filesystem/LVM/partition-table signatures
+wipefs --all --force /dev/${DISK}
+
+# Partitionning the disk
+sgdisk --zap-all --clear \
+  --new=1:0:+1GiB --typecode=1:ef00 --change-name=1:EFI \
+  --new=2:0:0 --typecode=2:8309 --change-name=2:SYS \
+  /dev/${DISK}
+
+# Wait for udevd to process the device creation events
+udevadm settle
+
+# EFI formatting
+mkfs.vfat -F32 -n EFI /dev/disk/by-partlabel/EFI
+
+# Main parition encryption
+LUKS_PASSPHRASE="$(ask_password "Provide a password for your encrypted partition")"
+echo -n "$LUKS_PASSPHRASE" | cryptsetup luksFormat \
+	--type luks2 \
+	--align-payload 8192 \
+	--pbkdf argon2id \
+	--pbkdf-memory 1048576 \
+	--pbkdf-parallel 4 \
+	--iter-time 1000 \
+	--key-size 256 \
+	--cipher aes-xts-plain64 \
+	/dev/disk/by-partlabel/SYS -
+
+# Opening the encrpyted partition
+echo -n "$LUKS_PASSPHRASE" | cryptsetup open /dev/disk/by-partlabel/SYS cryptroot -
+
+# BTFRS filesystem creation
+mkfs.btrfs -q --label DEBIAN /dev/mapper/cryptroot
+
+# Moutning the main filesystem and setup subvolumes
+mount /dev/mapper/cryptroot /mnt
+btrfs subvolume create /mnt/@ /mnt/@home /mnt/@docker
+umount /mnt
+
+# Mounting each subvolumes
+mount -o $OPTS,subvol=@ /dev/mapper/cryptroot /mnt
+mkdir -p /mnt/{home,tmp,var/tmp,boot/efi,var/lib/docker}
+mount -o $OPTS,subvol=@home /dev/mapper/cryptroot /mnt/home
+
+# Isolate docker files in a subvolume
+mount -o $OPTS,subvol=@docker /dev/mapper/cryptroot /mnt/var/lib/docker
+chattr +C /mnt/var/lib/docker
+
+# Mount the EFI partition
+mount /dev/disk/by-partlabel/EFI /mnt/boot/efi
+
+# Use tmpfs for temporary files
+mount -t tmpfs -o size=50%,mode=1777 tmpfs /mnt/tmp
+mount -t tmpfs -o size=50%,mode=1777 tmpfs /mnt/var/tmp
+
+# Mount the base filesystem and the selected desktop layer, then union them
+# read-only (most-specific lowerdir first) and rsync the merged view in one
+# pass. The desktop squashfs must be a *lowerdir*, not an overlay upperdir:
+# upperdir/workdir need a writable fs, and a loop-mounted squashfs is
+# read-only. Stacking it as a lowerdir also makes whiteouts (files removed
+# while installing the desktop task package, see config/hooks/live/9000-
+# create-desktop-layers.hook.binary) resolve as real deletions instead of
+# being rsync'd across as stray char-device nodes.
+DESKTOP_NAME=$(printf "gnome\nkde\nxfce" | gum choose --header "Select a desktop environment to install")
+mkdir -p /fs/base /fs/desktop /fs/merged
+mount -t squashfs -o loop /run/live/medium/live/filesystem.squashfs /fs/base
+mount -t squashfs -o loop /run/live/medium/desktops/${DESKTOP_NAME}-desktop.squashfs /fs/desktop
+mount -t overlay overlay -o lowerdir=/fs/desktop:/fs/base /fs/merged
+rsync -aHAX --info=progress2 /fs/merged/ /mnt/
+umount /fs/merged /fs/desktop /fs/base
+
+# Generate FSTAB (UUIDs — raw device paths like /dev/sda1 aren't
+# guaranteed to match on the target hardware's disk enumeration)
+genfstab -U /mnt | sed 's/subvolid=[0-9][0-9]*,//' >> /mnt/etc/fstab
+
+# Add tmpfs mounts for /tmp and /var/tmp
+cat <<EOF >> /mnt/etc/fstab
+tmpfs	/tmp 		tmpfs 	size=50%,mode=1777 0 0
+tmpfs	/var/tmp 	tmpfs 	size=50%,mode=1777 0 0
+EOF
+
+# Configure keyboard
+cp /etc/default/keyboard /mnt/etc/default/keyboard
+
+# Configure Dracut
+mkdir -p /mnt/etc/dracut.conf.d
+cat <<EOF > /mnt/etc/dracut.conf.d/80-hostonly.conf
+hostonly="yes"
+EOF
+
+cat <<EOF > /mnt/etc/dracut.conf.d/88-plymouth.conf
+add_dracutmodules+=" plymouth "
+EOF
+
+cat <<EOF > /mnt/etc/dracut.conf.d/89-filesystem.conf
+add_dracutmodules+=" btrfs "
+EOF
+
+cat <<EOF > /mnt/etc/dracut.conf.d/89-bootloader.conf
+add_dracutmodules+=" systemd "
+EOF
+
+cat <<EOF > /mnt/etc/dracut.conf.d/90-crypt.conf
+add_dracutmodules+=" crypt tpm2-tss "
+EOF
+
+# Prepare the chroot
+if ! mountpoint -q "/mnt/proc" ; then
+	mount -t proc none /mnt/proc
+	mount --make-rslave --rbind /sys /mnt/sys
+	mount --make-rslave --rbind /dev /mnt/dev
+	mount --make-rslave --rbind /run /mnt/run
+	mount --bind /etc/resolv.conf /mnt/etc/resolv.conf
+fi
+
+# Configure locale
+cp /etc/locale.gen /mnt/etc/locale.gen
+chroot /mnt/ locale-gen
+
+# Configuring Debian repositories
+cat <<EOF > /mnt/etc/apt/sources.list.d/debian.sources
+Types: deb
+URIs: http://deb.debian.org/debian/
+Suites: trixie
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://deb.debian.org/debian/
+Suites: trixie-updates
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://deb.debian.org/debian-security/
+Suites: trixie-security
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+
+cat <<EOF > /mnt/etc/apt/sources.list.d/debian-backports.sources
+Types: deb
+URIs: http://deb.debian.org/debian/
+Suites: trixie-backports
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+
+cat <<EOF > /mnt/etc/apt/preferences.d/99-debian-trixie-backports
+Package: *
+Pin: release n=trixie-backports
+Pin-Priority: 900
+EOF
+
+rm -f /mnt/etc/apt/sources.list
+
+# Configure user
+USER_FULL_NAME="$(gum input --placeholder "User full name")"
+USER_LOGIN="$(gum input --placeholder "User login")"
+USER_PWD="$(ask_password "User password")"
+chroot /mnt/ bash -c "adduser ${USER_LOGIN} --disabled-password --gecos "${USER_FULL_NAME}""
+chroot /mnt/ bash -c "adduser ${USER_LOGIN} sudo"
+echo "${USER_LOGIN}:${USER_PWD}" > /mnt/tmp/passwd
+chroot /mnt/ bash -c "chpasswd < /tmp/passwd"
+rm -f /mnt/tmp/passwd
+
+# Generate firstboot files
+UUID="$(blkid -s UUID -o value /dev/disk/by-partlabel/SYS)"
+KERNEL_PARAMS="rd.luks.name=${UUID}=cryptroot root=/dev/mapper/cryptroot rootflags=${OPTS},subvol=@ rw quiet splash"
+HOSTNAME="${USER_LOGIN}-on-debian"
+
+# Configure local network
+cat <<EOF > /mnt/etc/hosts
+127.0.0.1 localhost
+127.0.0.1 ${HOSTNAME}
+EOF
+
+systemd-firstboot \
+  --root=/mnt \
+  --locale="${LOCALE}" \
+  --timezone="Europe/Paris" \
+  --hostname="${HOSTNAME}" \
+  --kernel-command-line="${KERNEL_PARAMS}" \
+  --force
+
+# Mount APT cache (which contains bootloader packages and Gnome Desktop)
+mount /root/deb-cache /mnt/var/cache/apt/archives -o bind
+
+# Swap initramfs-tools for dracut in one transaction (trailing "-" removes
+# it): purging initramfs-tools before dracut satisfies the initramfs-
+# generator dependency would cascade-remove the kernel packages themselves.
+# DPkg::Post-Invoke is cleared because /run is rbind-mounted from the host
+# (see the chroot prep above), so packagekit's apt hook finds a real D-Bus
+# socket there and tries to notify a PackageKit daemon that was never
+# registered on it, logging a harmless but noisy GDBus ServiceUnknown error.
+chroot /mnt/ apt install -y -o DPkg::Post-Invoke="" grub-common- shim-signed systemd-boot systemd-boot-efi-amd64-signed dracut initramfs-tools- systemd-zram-generator plymouth plymouth-themes
+
+# initramfs-tools is already removed above (only its conffiles remain);
+# purge those via dpkg directly rather than apt, which would otherwise
+# re-run full dependency resolution just to drop an already-removed package.
+chroot /mnt/ dpkg --purge initramfs-tools
+
+# Purge live-only packages (config/package-lists/*.list.chroot_live, e.g.
+# gum) that came along with the base filesystem rsync'd above.
+chroot /mnt/ apt purge -y -o DPkg::Post-Invoke="" $(cat /run/live/medium/live/filesystem.packages-remove)
+
+# Remove leftover conf.d snippets dropped by other packages (e.g.
+# cryptsetup-initramfs) before purging, otherwise dpkg refuses to remove
+# the non-empty directory and logs a harmless warning.
+rm -rf /mnt/etc/initramfs-tools
+chroot /mnt/ apt autoremove -y --purge -o DPkg::Post-Invoke=""
+
+# Configuration ZRAM
+cat << 'EOF' > /mnt/etc/systemd/zram-generator.conf
+[zram0]
+zram-size = ram / 3
+compression-algorithm = zstd
+swap-priority = 100
+fs-type = swap
+EOF
+
+# Optimisation du swap avec zram
+cat << 'EOF' > /mnt/etc/sysctl.d/99-vm-zram-parameters.conf
+vm.swappiness = 180
+vm.watermark_boost_factor = 0
+vm.watermark_scale_factor = 125
+vm.page-cluster = 0
+EOF

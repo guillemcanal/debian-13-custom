@@ -1,0 +1,16 @@
+# Dev-only, never part of the ISO: `make test` injects it into the live VM as
+# a systemd credential (see Makefile). Copies config/includes.chroot, shared
+# by the host over 9p, onto the live root before any login, so edits are
+# picked up on the next boot without rebuilding the image. Re-apply during a
+# session with `sudo systemctl start devtree`.
+[Unit]
+Description=Copy host config/includes.chroot onto the live root
+ConditionPathExists=!/etc/initrd-release
+After=local-fs.target
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/mkdir -p /run/devtree
+ExecStartPre=/bin/sh -c 'mountpoint -q /run/devtree || mount -t 9p -o trans=virtio,version=9p2000.L,ro devtree /run/devtree'
+ExecStart=/bin/cp -a --no-preserve=ownership /run/devtree/. /

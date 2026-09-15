@@ -1,0 +1,24 @@
+#!/bin/bash
+# Download specified packages to apt cache without installing them
+# This allows the installer to access pre-downloaded packages
+set -e
+
+mkdir -p /root/deb-cache
+
+PACKAGES=(
+	"systemd-boot"
+	"systemd-boot-tools"
+	"systemd-cryptsetup"
+	"systemd-boot-efi-amd64-signed"
+	"systemd-ukify"
+	"dracut"
+    "shim-signed"
+	"systemd-zram-generator"
+	"plymouth"
+	"plymouth-themes"
+)
+
+# Download packages to apt cache without installing
+apt-get update
+apt-get -o Dir::Cache::archives="/root/deb-cache" \
+        install --download-only -y "${PACKAGES[@]}"
