@@ -1,0 +1,11 @@
+# Dev-only, never part of the ISO: `make test-tpm-locked` injects it into the
+# live VM like devtree.service. Hides the interface that asks the firmware to
+# clear the TPM2, which QEMU always provides, to get the tpm2-state module's "locked".
+[Unit]
+Description=Hide the TPM2 physical presence interface
+ConditionPathExists=!/etc/initrd-release
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/mount -t tmpfs -o ro tmpfs /sys/class/tpm/tpm0/ppi

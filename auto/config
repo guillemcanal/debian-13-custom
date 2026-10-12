@@ -2,16 +2,14 @@
 
 set -e
 
-# nox11autologin: xinit is installed for the Calamares session, so
-# live-config's "xinit" component would otherwise add a profile.d script
-# running startx on every tty1 login, dropping into a bare xterm.
 # ca-certificates is bootstrapped so the HTTPS archives in config/archives
 # (e.g. repo.charm.sh) can be fetched: they are set up before any package
 # list is installed.
+# DEBIAN and BACKPORTS are set by the Makefile.
 lb config noauto \
 	--clean \
 	--ignore-system-defaults \
-	--distribution trixie \
+	--distribution "${DEBIAN:-trixie}" \
 	--linux-packages "linux-image linux-headers" \
 	--architecture amd64 \
     --binary-image iso-hybrid \
@@ -19,8 +17,8 @@ lb config noauto \
 	--debian-installer none \
 	--memtest none \
 	--firmware-chroot false \
-	--bootappend-live "boot=live components quiet splash nox11autologin" \
-    --backports true \
+	--bootappend-live "boot=live components quiet splash" \
+    --backports "${BACKPORTS:-true}" \
 	--debootstrap-options "--include=ca-certificates" \
     --mirror-bootstrap http://deb.debian.org/debian/ \
     --mirror-binary http://deb.debian.org/debian/ \

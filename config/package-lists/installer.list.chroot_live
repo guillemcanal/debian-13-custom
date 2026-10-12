@@ -1,1 +1,15 @@
 gum
+debootstrap
+pv
+gdisk
+arch-install-scripts
+squashfs-tools
+calamares
+calamares-settings-debian
+polkitd
+pkexec
+systemd-boot-tools
+# Imported by tpm2-state.qml (calamares/src), and not dependencies of calamares
+# (forky installs neither without them)
+qml6-module-qtquick-controls
+qml6-module-qtquick-layouts

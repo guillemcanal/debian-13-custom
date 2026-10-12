@@ -8,6 +8,8 @@ binary*.zsync
 
 .build/
 build.log
+# DEBIAN and BACKPORTS of the last build (see the Makefile)
+/.release
 
 cache/
 
@@ -49,7 +51,14 @@ qemu/
 !/config/hooks/**/
 !/config/hooks/live/9000-create-desktop-layers.hook.binary
 !/config/hooks/live/9999-enable-ssh-password.hook.chroot
+!/config/hooks/normal/9970-target-apt-sources.hook.chroot
 !/config/hooks/normal/9990-download-packages.chroot
 
-
 __pycache__/
+
+# built by `make` from calamares/src/
+/calamares/modules/tpm2-state/
+
+# copied by `make` from calamares/config and calamares/modules
+/config/includes.chroot/etc/calamares/
+/config/includes.chroot/usr/lib/calamares/modules/

@@ -13,12 +13,16 @@ PACKAGES=(
 	"systemd-ukify"
 	"dracut"
     "shim-signed"
+	"efibootmgr"
 	"systemd-zram-generator"
 	"plymouth"
 	"plymouth-themes"
 )
 
-# Download packages to apt cache without installing
+# Download packages to apt cache without installing. The removals are the
+# installers' (dracut replaces initramfs-tools, which live-boot needs, and
+# conflicts with live-tools): apt >= 3.1's solver only removes what it is told.
 apt-get update
 apt-get -o Dir::Cache::archives="/root/deb-cache" \
-        install --download-only -y "${PACKAGES[@]}"
+        install --download-only -y "${PACKAGES[@]}" \
+        initramfs-tools- live-boot- live-boot-initramfs-tools- live-tools-

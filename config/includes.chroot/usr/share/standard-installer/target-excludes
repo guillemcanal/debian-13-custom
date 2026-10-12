@@ -1,0 +1,8 @@
+# rsync patterns: what only serves to install, and both installers keep out
+# of the installed system (unpackfs.conf's excludeFile, install-debian).
+/etc/calamares
+/etc/profile.d/99-run-installer.sh
+/root/deb-cache
+/usr/lib/calamares
+/usr/local/sbin/install-debian
+/usr/share/standard-installer

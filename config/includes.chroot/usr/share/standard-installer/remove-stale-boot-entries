@@ -1,0 +1,15 @@
+#!/bin/sh
+# Delete the UEFI boot entries whose GPT partition no longer exists (left by a
+# previous installation on a repartitioned disk), with the efibootmgr of the
+# system installed in $1: systemd-boot's postinst doesn't add its shim entry
+# while one with the same label and loader exists, wherever it points.
+set -e
+
+ROOT="$1"
+PARTUUIDS="$(lsblk -rno PARTUUID)"
+
+chroot "$ROOT" efibootmgr \
+	| sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\)\*\{0,1\} .*HD([0-9]*,GPT,\([0-9A-Fa-f-]*\),.*/\1 \2/p' \
+	| while read -r NUM UUID; do
+		echo "$PARTUUIDS" | grep -qix "$UUID" || chroot "$ROOT" efibootmgr -q -B -b "$NUM"
+	done

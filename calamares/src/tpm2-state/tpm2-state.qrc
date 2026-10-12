@@ -1,0 +1,5 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource>
+  <file alias="tpm2-state.qml">tpm2-state.qml</file>
+</qresource>
+</RCC>

@@ -4,12 +4,18 @@ set -ex
 SCRIPT_DIR="$(pwd)"
 WORK_DIR="/overlayfs/desktop-layers-work-$$"
 
+# /overlayfs is a Docker volume that outlives the build: drop what a build
+# that failed left there, nothing reuses it.
+rm -rf --one-file-system /overlayfs/desktop-layers-work-*
+
 # Base filesystem
 OVERLAY_LOWER="../chroot"
 
+# $1: desktop name. $2: install script, run in the chroot after
+# config/desktops/$1 (if it exists) is copied in.
 create_desktop_layer() {
 	local DESKTOP_NAME="$1"
-	local TASK_PACKAGE="$2"
+	local INSTALL_SCRIPT="$2"
 	local OVERLAY_UPPER="${WORK_DIR}/${DESKTOP_NAME}/upper"
 	local OVERLAY_WORK="${WORK_DIR}/${DESKTOP_NAME}/work"
 	local OVERLAY_MOUNT="${WORK_DIR}/${DESKTOP_NAME}/merged"
@@ -28,11 +34,17 @@ create_desktop_layer() {
 	mount --rbind /dev "${OVERLAY_MOUNT}/dev"
 	mount --rbind /run "${OVERLAY_MOUNT}/run"
 	mount --bind /etc/resolv.conf "${OVERLAY_MOUNT}/etc/resolv.conf"
-	
+
+	# Desktop-specific files
+	if [ -d "../config/desktops/${DESKTOP_NAME}" ]; then
+		cp -r "../config/desktops/${DESKTOP_NAME}/." "${OVERLAY_MOUNT}/"
+	fi
+
+	# Install the desktop
 	chroot "${OVERLAY_MOUNT}" /bin/bash -c "
 		set -e
 		export DEBIAN_FRONTEND=noninteractive
-		apt-get install -y ${TASK_PACKAGE}
+		${INSTALL_SCRIPT}
 	"
 
 	# Kill any remaining processes in chroot
@@ -40,28 +52,50 @@ create_desktop_layer() {
 	sleep 1
 	umount -R -l "${OVERLAY_MOUNT}" 2>/dev/null || true
 
+	# Cleanup unecessary files
+	rm -f "${OVERLAY_UPPER}"/var/cache/apt/archives/*.deb "${OVERLAY_UPPER}"/boot/initrd.img-*
+
 	# Create desktop squashfs
 	mkdir -p desktops
+	mksquashfs "${OVERLAY_UPPER}" "desktops/${DESKTOP_NAME}-desktop.squashfs" -comp zstd -noappend
 
-	# A file removed by installing ${TASK_PACKAGE} exists in OVERLAY_UPPER
-	# as a whiteout: a character device (major/minor 0/0), overlayfs' own
-	# marker meaning "hide the copy of this path in the layer below" —
-	# meaningless outside a real overlay mount. dpkg/apt never create
-	# character devices themselves, so any found here is one of those
-	# markers. Calamares' native "unpackfs" (see modules/unpackfs.conf)
-	# unpacks the base filesystem and this squashfs in sequence with a
-	# plain overwrite, no overlay resolution, so a whiteout left in would
-	# land on the target as a literal broken device node instead of the
-	# deletion it stands for. List them — relative to OVERLAY_UPPER, same
-	# as the paths apply-desktop-whiteouts later deletes relative to the
-	# install target — and keep them out of the image entirely.
-	local WHITEOUTS="desktops/${DESKTOP_NAME}-desktop.whiteouts"
-	find "${OVERLAY_UPPER}" -type c -printf '%P\n' > "${WHITEOUTS}"
+	# Images live-boot stacks with "module=${DESKTOP_NAME}"
+	printf 'filesystem.squashfs\n../desktops/%s-desktop.squashfs\n' "${DESKTOP_NAME}" > "live/filesystem.${DESKTOP_NAME}.module"
 
-	mksquashfs "${OVERLAY_UPPER}" "desktops/${DESKTOP_NAME}-desktop.squashfs" -comp zstd -ef "${WHITEOUTS}"
+	# --one-file-system: never descend into a mount the umount above left.
+	rm -rf --one-file-system "${WORK_DIR:?}/${DESKTOP_NAME}"
 }
 
 # Create layers for each desktop environment
-create_desktop_layer "gnome" "task-gnome-desktop"
-create_desktop_layer "kde" "task-kde-desktop"
-create_desktop_layer "xfce" "task-xfce-desktop"
+create_desktop_layer "gnome" "apt-get install -y task-gnome-desktop"
+create_desktop_layer "kde" "apt-get install -y task-kde-desktop"
+create_desktop_layer "xfce" "apt-get install -y task-xfce-desktop"
+
+# DankMaterialShell on niri with the DMS greeter (greetd), from DankLinux's
+# OBS: stable builds on trixie, -git ones after.
+# https://danklinux.com/docs/dankmaterialshell/installation/
+. ../config/bootstrap
+if [ "${LB_DISTRIBUTION}" = trixie ]; then
+	DANK_OBS=Debian_13 DANK_GIT=
+else
+	DANK_OBS=Debian_Testing DANK_GIT=-git
+fi
+
+DANK_REPOS=https://downloadcontent.opensuse.org/repositories/home:/AvengeMedia:
+
+create_desktop_layer "dank" "
+	printf 'Types: deb\nURIs: %s\nSuites: /\nSigned-By: /etc/apt/keyrings/avengemedia.asc\n\n' \
+		${DANK_REPOS}/danklinux/${DANK_OBS}/ ${DANK_REPOS}/dms${DANK_GIT}/${DANK_OBS}/ \
+		> /etc/apt/sources.list.d/danklinux.sources
+	apt-get update
+	apt-get install -y dms${DANK_GIT} dms-greeter${DANK_GIT} niri ghostty firefox-esr \
+		network-manager pipewire-audio xdg-user-dirs xwayland x11-xserver-utils \
+		gnome-shell- budgie-desktop- gnome-settings-daemon-
+	install -d -o nobody /tmp/skel
+	setpriv --reuid=nobody --regid=nogroup --clear-groups env HOME=/tmp/skel SYSTEMD_OFFLINE=1 sh -c '
+		dms setup headless --compositor niri --terminal ghostty &&
+		systemctl --user add-wants niri.service dms'
+	cp -a --no-preserve=ownership /tmp/skel/. /etc/skel/
+	rm -rf /tmp/skel
+	test -L /etc/skel/.config/systemd/user/niri.service.wants/dms.service
+"

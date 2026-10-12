@@ -1,0 +1,19 @@
+#!/bin/sh
+# The installed system's APT sources (target-files, copied by both installers)
+# name the release being built, with backports disabled when the build has none
+# (DEBIAN and BACKPORTS, see the Makefile).
+set -e
+
+. /live-build/config/bootstrap
+. /live-build/config/chroot
+
+# Written next to the *.in templates, not over them: `make test`'s devtree
+# copies config/includes.chroot, templates included, onto the live root.
+DIR=/usr/share/standard-installer/target-files/etc/apt/sources.list.d
+for TEMPLATE in "${DIR}"/*.sources.in; do
+	sed "s|@DISTRIBUTION@|${LB_DISTRIBUTION}|g" "${TEMPLATE}" > "${TEMPLATE%.in}"
+	rm "${TEMPLATE}"
+done
+if [ "${LB_BACKPORTS}" != true ]; then
+	echo "Enabled: no" >> "${DIR}/debian-backports.sources"
+fi

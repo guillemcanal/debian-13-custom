@@ -1,0 +1,15 @@
+#!/bin/sh
+# Drop from the system installed in $1 what was only installed for the live
+# system (config/package-lists/*.list.chroot_live, which live-build lists in
+# filesystem.packages-remove with the dependencies they pulled in): mark them
+# automatic and let autoremove keep those the installed desktop depends on.
+# Suggests aren't important: rsync's would keep openssh-server.
+set -e
+
+ROOT="$1"
+
+chroot "$ROOT" dpkg-query -W -f '${db:Status-Abbrev} ${binary:Package}\n' \
+	$(cat /run/live/medium/live/filesystem.packages-remove) 2>/dev/null \
+	| awk '/^ii/ { print $2 }' | xargs -r chroot "$ROOT" apt-mark auto >/dev/null
+chroot "$ROOT" apt-get autoremove -y --purge -o DPkg::Post-Invoke="" \
+	-o APT::AutoRemove::SuggestsImportant=false

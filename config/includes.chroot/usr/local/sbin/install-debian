@@ -5,8 +5,8 @@
 # - a simple paritionning model with an efi and a luks2 parition,
 # - a strong luks2 encryption, with slow key derivation and integrity protection tuned security for modern hardware,
 # - a btrfs filesystem optimized for timeshift,
-# - a completely offline installation with the possibility of choosing between several desktop environment (gnome, kde or xfce),
-# - a Debian Trixie the non free packages and backports (trying hard to be as unstable as Ubuntu LTS),
+# - a completely offline installation with the possibility of choosing between several desktop environment (gnome, kde, xfce or dank: DankMaterialShell on niri),
+# - a Debian Trixie or Forky (DEBIAN in the Makefile) the non free packages and backports (trying hard to be as unstable as Ubuntu LTS),
 # - systemd-boot and Dracdracut which replace Grub2 and Initramfs Tools because it's better (source: Internet),
 
 set -e
@@ -38,10 +38,6 @@ DISK=$(lsblk -d -n -o NAME,SIZE,TYPE,TRAN,MODEL \
 | gum choose --header "Select the disk on which to install Debian." | awk '{print $1}')
 
 # Configure locale
-# /usr/share/i18n/SUPPORTED is restricted (see config/includes.chroot/usr/
-# share/i18n/SUPPORTED) to fr_FR.UTF-8 and en_US.UTF-8, France first —
-# it used to be the full ~500-entry system list, with fr_FR/en_US
-# prepended and deduplicated here to float them to the top.
 LOCALE=$(awk '$2=="UTF-8"{print $1}' /usr/share/i18n/SUPPORTED \
 | gum choose --header "Select a locale")
 
@@ -154,20 +150,13 @@ mount /dev/disk/by-partlabel/EFI /mnt/boot/efi
 mount -t tmpfs -o size=50%,mode=1777 tmpfs /mnt/tmp
 mount -t tmpfs -o size=50%,mode=1777 tmpfs /mnt/var/tmp
 
-# Mount the base filesystem and the selected desktop layer, then union them
-# read-only (most-specific lowerdir first) and rsync the merged view in one
-# pass. The desktop squashfs must be a *lowerdir*, not an overlay upperdir:
-# upperdir/workdir need a writable fs, and a loop-mounted squashfs is
-# read-only. Stacking it as a lowerdir also makes whiteouts (files removed
-# while installing the desktop task package, see config/hooks/live/9000-
-# create-desktop-layers.hook.binary) resolve as real deletions instead of
-# being rsync'd across as stray char-device nodes.
-DESKTOP_NAME=$(printf "gnome\nkde\nxfce" | gum choose --header "Select a desktop environment to install")
+# Mount the base filesystem and the selected desktop layer
+DESKTOP_NAME=$(printf "gnome\nkde\nxfce\ndank" | gum choose --header "Select a desktop environment to install")
 mkdir -p /fs/base /fs/desktop /fs/merged
 mount -t squashfs -o loop /run/live/medium/live/filesystem.squashfs /fs/base
 mount -t squashfs -o loop /run/live/medium/desktops/${DESKTOP_NAME}-desktop.squashfs /fs/desktop
 mount -t overlay overlay -o lowerdir=/fs/desktop:/fs/base /fs/merged
-rsync -aHAX --info=progress2 /fs/merged/ /mnt/
+rsync -aHAX --info=progress2 --exclude-from=/usr/share/standard-installer/target-excludes /fs/merged/ /mnt/
 umount /fs/merged /fs/desktop /fs/base
 
 # Generate FSTAB (UUIDs — raw device paths like /dev/sda1 aren't
@@ -218,40 +207,10 @@ fi
 cp /etc/locale.gen /mnt/etc/locale.gen
 chroot /mnt/ locale-gen
 
-# Configuring Debian repositories
-cat <<EOF > /mnt/etc/apt/sources.list.d/debian.sources
-Types: deb
-URIs: http://deb.debian.org/debian/
-Suites: trixie
-Components: main contrib non-free non-free-firmware
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-
-Types: deb
-URIs: http://deb.debian.org/debian/
-Suites: trixie-updates
-Components: main contrib non-free non-free-firmware
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-
-Types: deb
-URIs: http://deb.debian.org/debian-security/
-Suites: trixie-security
-Components: main contrib non-free non-free-firmware
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-EOF
-
-cat <<EOF > /mnt/etc/apt/sources.list.d/debian-backports.sources
-Types: deb
-URIs: http://deb.debian.org/debian/
-Suites: trixie-backports
-Components: main contrib non-free non-free-firmware
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-EOF
-
-cat <<EOF > /mnt/etc/apt/preferences.d/99-debian-trixie-backports
-Package: *
-Pin: release n=trixie-backports
-Pin-Priority: 900
-EOF
+# Configuring Debian repositories: the files Calamares installs too, written
+# for the release of the ISO by 9970-target-apt-sources.hook.chroot
+cp /usr/share/standard-installer/target-files/etc/apt/sources.list.d/*.sources /mnt/etc/apt/sources.list.d/
+cp /usr/share/standard-installer/target-files/etc/apt/preferences.d/* /mnt/etc/apt/preferences.d/
 
 rm -f /mnt/etc/apt/sources.list
 
@@ -287,29 +246,16 @@ systemd-firstboot \
 # Mount APT cache (which contains bootloader packages and Gnome Desktop)
 mount /root/deb-cache /mnt/var/cache/apt/archives -o bind
 
-# Swap initramfs-tools for dracut in one transaction (trailing "-" removes
-# it): purging initramfs-tools before dracut satisfies the initramfs-
-# generator dependency would cascade-remove the kernel packages themselves.
-# DPkg::Post-Invoke is cleared because /run is rbind-mounted from the host
-# (see the chroot prep above), so packagekit's apt hook finds a real D-Bus
-# socket there and tries to notify a PackageKit daemon that was never
-# registered on it, logging a harmless but noisy GDBus ServiceUnknown error.
-chroot /mnt/ apt install -y -o DPkg::Post-Invoke="" grub-common- shim-signed systemd-boot systemd-boot-efi-amd64-signed dracut initramfs-tools- systemd-zram-generator plymouth plymouth-themes
+chroot /mnt/ apt install -y -o DPkg::Post-Invoke="" efibootmgr
+/usr/share/standard-installer/remove-stale-boot-entries /mnt
 
-# initramfs-tools is already removed above (only its conffiles remain);
-# purge those via dpkg directly rather than apt, which would otherwise
-# re-run full dependency resolution just to drop an already-removed package.
+# Swap initramfs-tools for dracut in one transaction
+chroot /mnt/ apt install -y -o DPkg::Post-Invoke="" grub-common- shim-signed efibootmgr systemd-boot systemd-boot-efi-amd64-signed dracut initramfs-tools- live-boot- live-boot-initramfs-tools- live-tools- systemd-zram-generator plymouth plymouth-themes
 chroot /mnt/ dpkg --purge initramfs-tools
 
-# Purge live-only packages (config/package-lists/*.list.chroot_live, e.g.
-# gum) that came along with the base filesystem rsync'd above.
-chroot /mnt/ apt purge -y -o DPkg::Post-Invoke="" $(cat /run/live/medium/live/filesystem.packages-remove)
-
-# Remove leftover conf.d snippets dropped by other packages (e.g.
-# cryptsetup-initramfs) before purging, otherwise dpkg refuses to remove
-# the non-empty directory and logs a harmless warning.
+# Remove leftover conf.d snippets dropped by other packages
 rm -rf /mnt/etc/initramfs-tools
-chroot /mnt/ apt autoremove -y --purge -o DPkg::Post-Invoke=""
+/usr/share/standard-installer/autoremove-live-packages /mnt
 
 # Configuration ZRAM
 cat << 'EOF' > /mnt/etc/systemd/zram-generator.conf

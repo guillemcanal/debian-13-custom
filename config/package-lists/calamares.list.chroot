@@ -1,9 +1,0 @@
-calamares
-calamares-settings-debian
-xserver-xorg
-xinit
-x11-xserver-utils
-polkitd
-pkexec
-systemd-boot-tools
-console-setup

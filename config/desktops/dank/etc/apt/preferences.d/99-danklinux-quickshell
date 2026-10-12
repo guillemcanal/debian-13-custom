@@ -1,0 +1,5 @@
+# DMS needs Debian's quickshell (trixie-backports on Debian 13): the DankLinux
+# OBS builds are deprecated, and dms-greeter would pull quickshell-git first.
+Package: quickshell quickshell-git
+Pin: release l=home:AvengeMedia:danklinux
+Pin-Priority: -1

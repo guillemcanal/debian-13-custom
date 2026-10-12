@@ -1,7 +1,5 @@
 ! Packages Priority standard
 
 task-laptop
-task-ssh-server
 gpg
 wget
-spice-vdagent
